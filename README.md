@@ -12,6 +12,11 @@ Magdroid is a application designed to manage Android devices using ADB, ws-scrcp
 
 <br>
 
+## Display:
+
+<img width="1573" height="775" alt="image" src="https://github.com/user-attachments/assets/2e9133d7-3335-41e9-89a0-ed947343c53f" />
+
+
 ## Getting Started
 
 ### Prerequisites

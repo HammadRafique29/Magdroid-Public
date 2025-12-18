@@ -31,8 +31,14 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 
-EXPOSE 3000
+# Use an ARG to receive the port from docker-compose
+ARG FRONTEND_PORT=3000
 
-ENV PORT 3000
+# Expose the port
+EXPOSE ${FRONTEND_PORT}
 
+# Set the PORT environment variable that Next.js automatically uses
+ENV PORT=${FRONTEND_PORT}
+
+# The start command will now respect the PORT environment variable
 CMD ["npm", "start"]

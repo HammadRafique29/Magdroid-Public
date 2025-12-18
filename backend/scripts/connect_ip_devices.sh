@@ -7,11 +7,73 @@ REACH_TIMEOUT=15
 PING_TIMEOUT=1
 ADB_PORT=5555
 
+# Read the device IP range from environment variable, with a default value.
+DEVICES_RANGE="${DEVICES_RANGE:-192.168.1.0/24}"
+
 echo
 echo "=============================================="
-echo "     Connecting To ADB TCP/IP Devices..."
+echo "     Connecting To ADB TCP/IP Devices"
 echo "=============================================="
+echo "Using IP Range: $DEVICES_RANGE"
 echo
+
+# Convert IP address to an integer for comparison.
+ip_to_int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    echo "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+
+# Check if a given IP is within any of the specified ranges.
+is_ip_in_range() {
+    local ip_to_check_int
+    ip_to_check_int=$(ip_to_int "$1")
+    
+    # Use standard IFS for splitting.
+    local OLD_IFS="$IFS"
+    IFS=','
+    
+    for range in $DEVICES_RANGE; do
+        # Restore IFS if needed inside the loop, though we mostly use pattern matching.
+        IFS="$OLD_IFS"
+
+        # CIDR format: 192.168.1.0/24
+        if [[ "$range" == *"/"* ]]; then
+            # Use ipcalc to check if the IP is in the subnet.
+            if ipcalc -c -n "$range" "$1" &>/dev/null; then
+                return 0 # IP is in the range.
+            fi
+
+        # Range format: 192.168.1.40-192.168.1.45
+        elif [[ "$range" == *"-"* ]]; then
+            local start_ip end_ip
+            start_ip="${range%-*}"
+            end_ip="${range#*-}"
+            
+            local start_ip_int end_ip_int
+            start_ip_int=$(ip_to_int "$start_ip")
+            end_ip_int=$(ip_to_int "$end_ip")
+            
+            if [[ "$ip_to_check_int" -ge "$start_ip_int" ]] && [[ "$ip_to_check_int" -le "$end_ip_int" ]]; then
+                return 0 # IP is in the range.
+            fi
+
+        # Single IP format: 192.168.2.100
+        else
+            if [[ "$1" == "$range" ]]; then
+                return 0 # IP matches.
+            fi
+        fi
+
+        # Reset IFS for the next iteration of the loop.
+        IFS=","
+    done
+    
+    # Restore original IFS after loop.
+    IFS="$OLD_IFS"
+    
+    return 1 # IP is not in any of the ranges.
+}
 
 echo " • Restarting ADB server..."
 adb kill-server >/dev/null 2>&1
@@ -26,7 +88,7 @@ echo
 # [A] GET CONNECTED DEVICES (USB + TCP)
 # ==========================================
 ADB_CONNECTED=$(adb devices | grep -w "device" | awk '{print $1}')
-
+echo "$ADB_CONNECTED"
 
 # ==========================================
 # [B] DISCOVER DEVICES VIA mDNS
@@ -41,6 +103,7 @@ else
     MDNS_FOUND=true
 fi
 
+echo "$MDNS_FOUND"
 
 # ==========================================
 # [C] IF mDNS FAILS → SCAN LOCAL NETWORK
@@ -55,38 +118,71 @@ if [ "$MDNS_FOUND" = false ]; then
     echo "=============================================="
     echo
 
-    LOCAL_IP=$(hostname -I | awk '{print $1}')
-    BASE="${LOCAL_IP%.*}"
-
-    echo " • Subnet: $BASE.x"
-    echo " • Ping Wait: $SCAN_TIMEOUT_PING sec"
-    echo " • Port Timeout: $SCAN_TIMEOUT_PORT sec"
-    echo
-
+    # Create temporary file for results
     TMPFILE=$(mktemp)
 
     # Allow many parallel sockets
     ulimit -n 4096
 
-    for i in {1..254}; do
-        (
-            IP="$BASE.$i"
+    # Helper: iterate over DEVICE_RANGE (supports CIDR or dash ranges)
+    iterate_ip_range() {
+        local range="$1"
 
-            # ⚡ ultra fast ping (100ms)
-            ping -c1 -W$SCAN_TIMEOUT_PING "$IP" >/dev/null 2>&1 || exit
+        if [[ "$range" == *"/"* ]]; then
+            # CIDR range → use 'prips' or 'ipcalc -n'
+            # Fallback to seq on last octet
+            BASE="${range%.*}.0"
+            START=1
+            END=254
+            for i in $(seq $START $END); do
+                echo "${BASE%0}$i"
+            done
+        elif [[ "$range" == *"-"* ]]; then
+            # Dash range: 192.168.1.40-192.168.1.45
+            local start_ip="${range%-*}"
+            local end_ip="${range#*-}"
 
-            # ⚡ ultra fast port check (200ms)
-            timeout $SCAN_TIMEOUT_PORT bash -c "</dev/tcp/$IP/5555" 2>/dev/null || exit
+            local start_int end_int
+            start_int=$(ip_to_int "$start_ip")
+            end_int=$(ip_to_int "$end_ip")
 
-            echo "$IP:5555" >> "$TMPFILE"
-        ) &
+            for ((ip=start_int; ip<=end_int; ip++)); do
+                echo "$(int_to_ip "$ip")"
+            done
+        else
+            # Single IP
+            echo "$range"
+        fi
+    }
+
+    # Helper: convert int → IP
+    int_to_ip() {
+        local ip=$1
+        echo "$(( (ip >> 24) & 255 )).$(( (ip >> 16) & 255 )).$(( (ip >> 8) & 255 )).$((ip & 255))"
+    }
+
+    # Iterate through DEVICE_RANGE and scan each IP
+    for range in ${DEVICE_RANGE//,/ }; do
+        while read -r IP; do
+            (
+                # ⚡ ultra fast ping
+                ping -c1 -W$SCAN_TIMEOUT_PING "$IP" >/dev/null 2>&1 || exit
+
+                # ⚡ ultra fast ADB port check
+                timeout $SCAN_TIMEOUT_PORT bash -c "</dev/tcp/$IP/5555" 2>/dev/null || exit
+
+                # Only write authorized IPs
+                echo "$IP:5555" >> "$TMPFILE"
+            ) &
+        done < <(iterate_ip_range "$range")
     done
 
+    # Wait for all background jobs
     wait
 
     if [ -s "$TMPFILE" ]; then
-        echo "✔ Active ADB devices detected:"
-        cat "$TMPFILE"
+        echo "✔ Active & authorized ADB devices detected:"
+        sort -u "$TMPFILE"
         echo
 
         # Connect fast
@@ -98,7 +194,7 @@ if [ "$MDNS_FOUND" = false ]; then
 
         LAN_DEVICES=$(cat "$TMPFILE")
     else
-        echo "❌ No ADB devices found in scan."
+        echo "❌ No authorized ADB devices found in scan."
     fi
 
     rm "$TMPFILE"
@@ -111,15 +207,25 @@ fi
 UNIQUE=""
 
 if [ "$MDNS_FOUND" = true ]; then
-    UNIQUE=$(echo "$MDNS_RAW" | awk '{print $1, $3}')
+    # Filter mDNS results here, before they are added to the UNIQUE list
+    while read -r name ipport; do
+        ip="${ipport%:*}"
+        if is_ip_in_range "$ip"; then
+            UNIQUE+="$name $ipport"$'\n'
+        fi
+    done <<< "$(echo "$MDNS_RAW" | awk '{print $1, $3}')"
 fi
+# echo "$UNIQUE"
 
 if [ -n "$LAN_DEVICES" ]; then
+    # The LAN_DEVICES list is already pre-filtered, so we can add it directly.
     while read -r IPPORT; do
         [ -z "$IPPORT" ] && continue
+        # The device name is arbitrary for LAN scans, so "LAN_Device" is fine.
         UNIQUE+="LAN_Device $IPPORT"$'\n'
     done <<< "$LAN_DEVICES"
 fi
+# echo "$LAN_DEVICES"
 
 if [ -z "$UNIQUE" ]; then
     echo
@@ -127,17 +233,69 @@ if [ -z "$UNIQUE" ]; then
     exit 0
 fi
 
+# ==========================================
+# [D.1] FILTER DEVICES BY IP RANGE
+# ==========================================
+FILTERED_UNIQUE=""
+
+while read -r NAME IPPORT; do
+    [ -z "$IPPORT" ] && continue
+
+    IP="${IPPORT%:*}"
+
+    if is_ip_in_range "$IP"; then
+        FILTERED_UNIQUE+="$NAME $IPPORT"$'\n'
+    fi
+done < <(echo "$UNIQUE")
+
+echo "$FILTERED_UNIQUE"
+
+
+# Replace UNIQUE with the filtered list
+UNIQUE="$FILTERED_UNIQUE"
+
+if [ -z "$UNIQUE" ]; then
+    echo
+    echo "❌ No devices found within the authorized IP range ($DEVICES_RANGE)."
+    exit 0
+fi
+
 
 # ==========================================
 # DISPLAY UNIQUE DEVICES
 # ==========================================
+
+# Re-filter the merged list to be absolutely sure no unauthorized devices slip through.
+FILTERED_UNIQUE=""
+
+while read -r NAME IPPORT; do
+    [ -z "$IPPORT" ] && continue
+    IP="${IPPORT%:*}"
+
+    if is_ip_in_range "$IP"; then
+        FILTERED_UNIQUE+="$NAME $IPPORT"$'\n'
+    fi
+done <<< "$UNIQUE"
+
+UNIQUE="$FILTERED_UNIQUE"
+# echo "$UNIQUE"
+
+if [ -z "$UNIQUE" ]; then
+    echo
+    echo "❌ No devices found within the authorized IP range ($DEVICES_RANGE)."
+    exit 0
+fi
+
+
 echo
 echo "---------------- Unique ADB Devices ----------------"
-echo "$UNIQUE" | while read -r NAME IPPORT; do
+echo "$UNIQUE"
+
+while read -r NAME IPPORT; do
     printf "Device: %-20s | IP: %s\n" "$NAME" "$IPPORT"
-done
+done <<< "$UNIQUE"
+
 echo "---------------------------------------------------"
-echo
 
 
 # ==========================================
@@ -151,6 +309,12 @@ echo "$UNIQUE" | while read -r NAME IPPORT; do
 
     IP="${IPPORT%:*}"
 
+    # Validate IP before attempting any connection.
+    if ! is_ip_in_range "$IP"; then
+        echo "Skipping device $IP (not in authorized range)"
+        continue
+    fi
+    
     # Already connected?
     if adb devices | grep -q "$IPPORT"; then
         echo " • $IPPORT already connected → checking..."
@@ -199,6 +363,12 @@ echo "$UNIQUE" | while read -r NAME IPPORT; do
     IP="${IPPORT%:*}"
 
     printf " • Checking %s (%s)... " "$NAME" "$IP"
+
+    # Also check range for health checks.
+    if ! is_ip_in_range "$IP"; then
+        echo "Skipped_unauthorized_device: $IP (Health Check)"
+        continue
+    fi
 
     ping -c1 -W"$PING_TIMEOUT" "$IP" >/dev/null 2>&1
     if [ $? -eq 0 ]; then

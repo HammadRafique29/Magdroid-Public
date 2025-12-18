@@ -39,3 +39,8 @@ Thumbs.db
 
 # Docker ignore files should be versioned, but in case they are not:
 .dockerignore
+
+venv
+dist
+build
+node_modules

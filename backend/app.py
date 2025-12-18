@@ -14,12 +14,13 @@ import config
 from auth_middleware import validate_clerk_token
 from process_manager import ProcessManager
 
-WS_SCRCPY_PATH = os.path.join(os.getcwd(), "ws-scrcpy")
-
 app = Flask(__name__)
 
 # Configure CORS from environment variables
 cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
+BACKEND_PORT = os.getenv('BACKEND_PORT', '5000')
+WS_SCRCPY_PATH = os.path.join(os.getcwd(), "ws-scrcpy")
+
 CORS(app, origins=cors_origins, supports_credentials=True)
 
 # Initialize process manager
@@ -99,28 +100,120 @@ def assign_tcpip():
 
 @app.route('/get_adb_devices')
 def get_adb_devices():
+    """
+    Executes 'adb devices' and filters the output based on the DEVICES_RANGE environment variable.
+    This ensures that only devices within the specified IP range(s) are returned to the frontend.
+    """
     try:
         # Execute adb devices command
         result = subprocess.run(
             ['adb', 'devices'],
             capture_output=True,
-            text=True
+            text=True,
+            check=True
         )
         
-        # Sanitize output to ensure it's valid JSON
-        output = result.stdout.strip()
+        # Get the allowed IP range from environment variables, with a default.
+        devices_range_str = os.getenv('DEVICES_RANGE', "192.168.1.0/24")
+        
+        # Parse the raw output from 'adb devices'.
+        raw_output = result.stdout.strip()
+        lines = raw_output.split('\n')
+        
+        # The first line is always "List of devices attached", so we skip it.
+        device_lines = lines[1:]
+        
+        # Filter devices based on the IP range.
+        filtered_devices = []
+        for line in device_lines:
+            if not line.strip():
+                continue
+                
+            # Device ID is the first part of the line.
+            device_id = line.split('\t')[0]
+            
+            # Extract the IP address from the device ID (e.g., '192.168.1.10:5555').
+            # This regex ensures we only match IP-based devices, not USB ones.
+            match = re.match(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', device_id)
+            
+            if match:
+                ip = match.group(1)
+                # If the IP is in one of the allowed ranges, keep the device.
+                if is_ip_in_range(ip, devices_range_str):
+                    filtered_devices.append(line)
+            else:
+                # Keep non-IP devices (e.g., USB devices) as they are not subject to IP filtering.
+                filtered_devices.append(line)
+
+        # Reconstruct the output string with only the authorized devices.
+        filtered_output = "List of devices attached\n" + "\n".join(filtered_devices)
         
         return jsonify({
             "status": "success",
-            "output": output,
+            "output": filtered_output,
             "details": f"Command exited with code {result.returncode}"
         })
+    except subprocess.CalledProcessError as e:
+        return jsonify({
+            "status": "error",
+            "output": e.stderr,
+            "details": f"ADB command failed with exit code {e.returncode}"
+        }), 500
     except Exception as e:
         return jsonify({
             "status": "error",
-            "output": "",
+            "output": "An unexpected error occurred.",
             "details": str(e)
         }), 500
+
+
+def is_ip_in_range(ip, ranges_str):
+    """
+    Checks if a given IP address is within any of the specified ranges.
+    
+    Args:
+        ip (str): The IP address to check.
+        ranges_str (str): A comma-separated string of ranges (CIDR, IP-IP, or single IP).
+        
+    Returns:
+        bool: True if the IP is in any range, False otherwise.
+    """
+    import ipaddress
+
+    try:
+        ip_addr = ipaddress.ip_address(ip)
+    except ValueError:
+        # If the IP is invalid, it can't be in any valid range.
+        return False
+
+    for r in ranges_str.split(','):
+        r = r.strip()
+        if not r:
+            continue
+            
+        try:
+            # Handle CIDR format (e.g., "192.168.1.0/24")
+            if '/' in r:
+                net = ipaddress.ip_network(r, strict=False)
+                if ip_addr in net:
+                    return True
+            
+            # Handle range format (e.g., "192.168.1.40-192.168.1.45")
+            elif '-' in r:
+                start_ip, end_ip = r.split('-')
+                if ipaddress.ip_address(start_ip) <= ip_addr <= ipaddress.ip_address(end_ip):
+                    return True
+            
+            # Handle single IP format
+            else:
+                if ip_addr == ipaddress.ip_address(r):
+                    return True
+        except ValueError:
+            # Silently ignore malformed ranges in the config.
+            # You might want to log this in a real application.
+            continue
+            
+    return False
 
 @app.route('/get_mdns_services')
 def get_mdns_services():
@@ -129,18 +222,49 @@ def get_mdns_services():
         result = subprocess.run(
             ['adb', 'mdns', 'services'],
             capture_output=True,
-            text=True
+            text=True,
+            check=True
         )
+
+        devices_range_str = os.getenv('DEVICES_RANGE', "192.168.1.0/24")
         
+        # Parse and filter the output
+        raw_output = result.stdout.strip()
+        lines = raw_output.split('\n')
+        
+        filtered_lines = []
+        for line in lines:
+            if not line.strip() or "_adb._tcp." not in line:
+                continue
+
+            # The IP address is the third field in the output
+            parts = line.split()
+            if len(parts) >= 3:
+                # The IP can be in the format '192.168.1.10:5555'
+                ip_part = parts[2]
+                ip_match = re.match(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', ip_part)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    if is_ip_in_range(ip, devices_range_str):
+                        filtered_lines.append(line)
+
+        filtered_output = "\n".join(filtered_lines).strip()
+
         return jsonify({
             "status": "success",
-            "output": result.stdout,
+            "output": filtered_output if filtered_output else "No Serives Found In Mdns",
             "details": f"Command exited with code {result.returncode}"
         })
+    except subprocess.CalledProcessError as e:
+        return jsonify({
+            "status": "error",
+            "output": e.stderr,
+            "details": f"ADB command failed with exit code {e.returncode}"
+        }), 500
     except Exception as e:
         return jsonify({
             "status": "error",
-            "output": "",
+            "output": "An unexpected error occurred.",
             "details": str(e)
         }), 500
 
@@ -167,9 +291,30 @@ def connect_ip_devices():
             "details": str(e)
         }), 500
 
+
 @app.route('/connect_device/<device_id>')
 def connect_device(device_id):
     try:
+        # Extract IP from device_id, which might be in 'ip:port' format
+        ip_match = re.match(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', device_id)
+        if not ip_match:
+            return jsonify({
+                "status": "error",
+                "output": "Invalid device ID format. Expected IP address.",
+                "details": "Device ID does not appear to be a valid IP address."
+            }), 400
+
+        ip_address = ip_match.group(1)
+        devices_range_str = os.getenv('DEVICES_RANGE', "192.168.1.0/24")
+
+        # Validate the IP address against the allowed range
+        if not is_ip_in_range(ip_address, devices_range_str):
+            return jsonify({
+                "status": "error",
+                "output": f"Connection to {ip_address} is not allowed.",
+                "details": "The device IP is outside the configured DEVICES_RANGE."
+            }), 403
+
         # Execute adb connect command
         connect_result = subprocess.run(
             ['adb', 'connect', device_id],
@@ -177,16 +322,38 @@ def connect_device(device_id):
             text=True
         )
 
-        # Get updated device list
+        # Get updated device list and filter it
         devices_result = subprocess.run(
             ['adb', 'devices'],
             capture_output=True,
             text=True
         )
+        
+        # This part is now handled by get_adb_devices, but for direct feedback we can filter here too
+        raw_output = devices_result.stdout.strip()
+        lines = raw_output.split('\n')
+        device_lines = lines[1:]
+        
+        filtered_devices = []
+        for line in device_lines:
+            if not line.strip():
+                continue
+            
+            # This logic is duplicated from get_adb_devices. Consider refactoring to a shared utility.
+            current_device_id = line.split('\t')[0]
+            match = re.match(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', current_device_id)
+            if match:
+                ip = match.group(1)
+                if is_ip_in_range(ip, devices_range_str):
+                    filtered_devices.append(line)
+            else:
+                filtered_devices.append(line)
+
+        filtered_output = "List of devices attached\n" + "\n".join(filtered_devices)
 
         return jsonify({
             "status": "success",
-            "output": f"Connect result:\n{connect_result.stdout}\n\nDevices list:\n{devices_result.stdout}",
+            "output": f"Connect result:\n{connect_result.stdout}\n\nDevices list:\n{filtered_output}",
             "details": f"Commands exited with codes {connect_result.returncode} and {devices_result.returncode}"
         })
     except Exception as e:
@@ -196,34 +363,88 @@ def connect_device(device_id):
             "details": str(e)
         }), 500
 
+
+
 @app.route('/disconnect_all_devices')
 def disconnect_all_devices():
     try:
-        # Execute command to disconnect all devices
-        result = subprocess.run(
-            ['bash', '-c', 'for i in $(adb devices | awk \'NR>1 {print $1}\'); do adb disconnect $i; done'],
+        # Get the list of currently connected devices
+        devices_result = subprocess.run(
+            ['adb', 'devices'],
             capture_output=True,
-            text=True
+            text=True,
+            check=True
         )
 
-        # Get updated device list to show result
-        devices_result = subprocess.run(
+        raw_output = devices_result.stdout.strip()
+        lines = raw_output.split('\n')
+        device_lines = lines[1:]
+
+        devices_range_str = os.getenv('DEVICES_RANGE', "192.168.1.0/24")
+        
+        disconnected_devices = []
+        skipped_devices = []
+
+        # Iterate over each device and decide whether to disconnect
+        for line in device_lines:
+            if not line.strip():
+                continue
+            
+            device_id = line.split('\t')[0]
+            ip_match = re.match(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', device_id)
+            
+            # We only disconnect devices that are within the allowed range.
+            # This prevents this instance from interfering with devices managed by other instances.
+            if ip_match:
+                ip = ip_match.group(1)
+                if is_ip_in_range(ip, devices_range_str):
+                    subprocess.run(['adb', 'disconnect', device_id], capture_output=True, text=True)
+                    disconnected_devices.append(device_id)
+                else:
+                    skipped_devices.append(device_id)
+            else:
+                # Assuming USB devices should not be disconnected by this logic.
+                skipped_devices.append(f"{device_id} (USB device)")
+
+
+        # Get final device list
+        final_devices_result = subprocess.run(
             ['adb', 'devices'],
             capture_output=True,
             text=True
         )
+        output_message = ""
+        if disconnected_devices:
+            output_message += "Disconnected Devices:"
+            for x in disconnected_devices: output_message += f"\n- {x}"
+        else: output_message += "No Devices To Disconnect..."
+
+        skipped_devices = ""
+        if skipped_devices:
+            output_message += "\n\nSkipped Devices:"
+            for x in skipped_devices: output_message += f"\n-{x}"
+        else: output_message += "\n\nNo Devices Skipped..."
+
+        output_message += "\n\n" + final_devices_result.stdout.strip()
 
         return jsonify({
             "status": "success",
-            "output": f"Disconnect result:\n{result.stdout}\n\nUpdated devices list:\n{devices_result.stdout}",
-            "details": f"Commands exited with codes {result.returncode} and {devices_result.returncode}"
+            "output": output_message,
+            "details": "Disconnect command executed for devices within the allowed range."
         })
+    except subprocess.CalledProcessError as e:
+        return jsonify({
+            "status": "error",
+            "output": e.stderr,
+            "details": f"ADB command failed with exit code {e.returncode}"
+        }), 500
     except Exception as e:
         return jsonify({
             "status": "error",
-            "output": "",
+            "output": "An unexpected error occurred.",
             "details": str(e)
         }), 500
+
 
 # ws-scrcpy Endpoints
 @app.route('/run_ws_scrcpy')
@@ -449,4 +670,5 @@ def stop_scrcpy_tunnel():
         }), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+
+    app.run(host='0.0.0.0', port=BACKEND_PORT, debug=True)

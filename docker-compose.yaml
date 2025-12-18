@@ -9,8 +9,9 @@ services:
       args:
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
         NEXT_PUBLIC_BACKEND_API_URL: ${NEXT_PUBLIC_BACKEND_API_URL}
+        FRONTEND_PORT: ${FRONTEND_PORT}
     
-    image: magdroid-frontend:latest
+    image: magdroid-frontend:v1.1
     container_name: magdroid_frontend
     restart: unless-stopped
     environment:
@@ -20,7 +21,7 @@ services:
       NEXT_PUBLIC_BACKEND_API_URL: ${NEXT_PUBLIC_BACKEND_API_URL}
     
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -36,7 +37,7 @@ services:
         BACKEND_PORT: ${BACKEND_PORT}
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
 
-    image: magdroid-backend:latest
+    image: magdroid-backend:v1.1
     container_name: magdroid_backend
     restart: unless-stopped
     environment:
@@ -46,7 +47,8 @@ services:
       CLERK_ISSUER: ${CLERK_ISSUER}
       CLOUDFLARED_TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN}
       CORS_ORIGINS: ${CORS_ORIGINS}
-      ADB_SERVER_PORT: 5038
+      ADB_SERVER_PORT: ${ADB_SERVER_PORT}
+      DEVICES_RANGE: ${DEVICES_RANGE}
     
     volumes:
       - /home/${USER}/Documents/Automation/MagDroid/data:/app/data

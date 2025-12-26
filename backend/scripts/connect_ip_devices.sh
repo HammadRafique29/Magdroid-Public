@@ -106,99 +106,97 @@ fi
 echo "$MDNS_FOUND"
 
 # ==========================================
-# [C] IF mDNS FAILS → SCAN LOCAL NETWORK
+# [C] SCAN LOCAL NETWORK
 # ==========================================
 LAN_DEVICES=""
 SCAN_TIMEOUT_PING="0.1"     # 100 ms
 SCAN_TIMEOUT_PORT="0.2"     # 200 ms
 
-if [ "$MDNS_FOUND" = false ]; then
+echo
+echo "⚡ Running Ultra-Fast LAN Scan"
+echo "=============================================="
+echo
+
+# Create temporary file for results
+TMPFILE=$(mktemp)
+
+# Allow many parallel sockets
+ulimit -n 4096
+
+# Helper: iterate over DEVICE_RANGE (supports CIDR or dash ranges)
+iterate_ip_range() {
+    local range="$1"
+
+    if [[ "$range" == *"/"* ]]; then
+        # CIDR range → use 'prips' or 'ipcalc -n'
+        # Fallback to seq on last octet
+        BASE="${range%.*}.0"
+        START=1
+        END=254
+        for i in $(seq $START $END); do
+            echo "${BASE%0}$i"
+        done
+    elif [[ "$range" == *"-"* ]]; then
+        # Dash range: 192.168.1.40-192.168.1.45
+        local start_ip="${range%-*}"
+        local end_ip="${range#*-}"
+
+        local start_int end_int
+        start_int=$(ip_to_int "$start_ip")
+        end_int=$(ip_to_int "$end_ip")
+
+        for ((ip=start_int; ip<=end_int; ip++)); do
+            echo "$(int_to_ip "$ip")"
+        done
+    else
+        # Single IP
+        echo "$range"
+    fi
+}
+
+# Helper: convert int → IP
+int_to_ip() {
+    local ip=$1
+    echo "$(( (ip >> 24) & 255 )).$(( (ip >> 16) & 255 )).$(( (ip >> 8) & 255 )).$((ip & 255))"
+}
+
+# Iterate through DEVICE_RANGE and scan each IP
+for range in ${DEVICE_RANGE//,/ }; do
+    while read -r IP; do
+        (
+            # ⚡ ultra fast ping
+            ping -c1 -W$SCAN_TIMEOUT_PING "$IP" >/dev/null 2>&1 || exit
+
+            # ⚡ ultra fast ADB port check
+            timeout $SCAN_TIMEOUT_PORT bash -c "</dev/tcp/$IP/5555" 2>/dev/null || exit
+
+            # Only write authorized IPs
+            echo "$IP:5555" >> "$TMPFILE"
+        ) &
+    done < <(iterate_ip_range "$range")
+done
+
+# Wait for all background jobs
+wait
+
+if [ -s "$TMPFILE" ]; then
+    echo "✔ Active & authorized ADB devices detected:"
+    sort -u "$TMPFILE"
     echo
-    echo "⚡ mDNS = 0 → Running Ultra-Fast LAN Scan"
-    echo "=============================================="
-    echo
 
-    # Create temporary file for results
-    TMPFILE=$(mktemp)
+    # Connect fast
+    while read -r IPPORT; do
+        adb connect "$IPPORT" >/dev/null 2>&1 &
+    done < "$TMPFILE"
 
-    # Allow many parallel sockets
-    ulimit -n 4096
-
-    # Helper: iterate over DEVICE_RANGE (supports CIDR or dash ranges)
-    iterate_ip_range() {
-        local range="$1"
-
-        if [[ "$range" == *"/"* ]]; then
-            # CIDR range → use 'prips' or 'ipcalc -n'
-            # Fallback to seq on last octet
-            BASE="${range%.*}.0"
-            START=1
-            END=254
-            for i in $(seq $START $END); do
-                echo "${BASE%0}$i"
-            done
-        elif [[ "$range" == *"-"* ]]; then
-            # Dash range: 192.168.1.40-192.168.1.45
-            local start_ip="${range%-*}"
-            local end_ip="${range#*-}"
-
-            local start_int end_int
-            start_int=$(ip_to_int "$start_ip")
-            end_int=$(ip_to_int "$end_ip")
-
-            for ((ip=start_int; ip<=end_int; ip++)); do
-                echo "$(int_to_ip "$ip")"
-            done
-        else
-            # Single IP
-            echo "$range"
-        fi
-    }
-
-    # Helper: convert int → IP
-    int_to_ip() {
-        local ip=$1
-        echo "$(( (ip >> 24) & 255 )).$(( (ip >> 16) & 255 )).$(( (ip >> 8) & 255 )).$((ip & 255))"
-    }
-
-    # Iterate through DEVICE_RANGE and scan each IP
-    for range in ${DEVICE_RANGE//,/ }; do
-        while read -r IP; do
-            (
-                # ⚡ ultra fast ping
-                ping -c1 -W$SCAN_TIMEOUT_PING "$IP" >/dev/null 2>&1 || exit
-
-                # ⚡ ultra fast ADB port check
-                timeout $SCAN_TIMEOUT_PORT bash -c "</dev/tcp/$IP/5555" 2>/dev/null || exit
-
-                # Only write authorized IPs
-                echo "$IP:5555" >> "$TMPFILE"
-            ) &
-        done < <(iterate_ip_range "$range")
-    done
-
-    # Wait for all background jobs
     wait
 
-    if [ -s "$TMPFILE" ]; then
-        echo "✔ Active & authorized ADB devices detected:"
-        sort -u "$TMPFILE"
-        echo
-
-        # Connect fast
-        while read -r IPPORT; do
-            adb connect "$IPPORT" >/dev/null 2>&1 &
-        done < "$TMPFILE"
-
-        wait
-
-        LAN_DEVICES=$(cat "$TMPFILE")
-    else
-        echo "❌ No authorized ADB devices found in scan."
-    fi
-
-    rm "$TMPFILE"
+    LAN_DEVICES=$(cat "$TMPFILE")
+else
+    echo "❌ No authorized ADB devices found in scan."
 fi
+
+rm "$TMPFILE"
 
 
 # ==========================================

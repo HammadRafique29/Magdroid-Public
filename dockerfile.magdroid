@@ -1,0 +1,87 @@
+# ===== Backend Build Stage =====
+FROM node:20-bullseye AS backend
+ARG BACKEND_PORT
+# Install dependencies required for scrcpy + chromium
+RUN apt-get update && apt-get install -y \
+  wget unzip curl git build-essential python3 python3-dev python3-pip g++ make \
+  libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev \
+  libasound2 libxrandr2 libxkbcommon-dev libxfixes3 \
+  libxcomposite1 libxdamage1 libatk-bridge2.0-0 libcups2 \
+  netcat-openbsd \
+  && rm -rf /var/lib/apt/lists/*
+# Download latest Android SDK platform-tools (ADB)
+RUN wget -q https://dl.google.com/android/repository/platform-tools-latest-linux.zip -O /tmp/platform-tools.zip \
+    && unzip /tmp/platform-tools.zip -d /opt \
+    && rm /tmp/platform-tools.zip
+# Add ADB to PATH
+ENV PATH="/opt/platform-tools:$PATH"
+# Ensure node-gyp uses Python 3
+ENV NODE_GYP_FORCE_PYTHON=python3
+# Set working directory
+WORKDIR /app
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    adb \
+    ipcalc \
+    && rm -rf /var/lib/apt/lists/*
+# --- Install Node.js for ws-scrcpy ---
+# Add Node.js repository and install it
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs
+# Add cloudflare gpg key
+RUN mkdir -p --mode=0755 /usr/share/keyrings && \
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
+# Add cloudflare repo
+RUN echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' | tee /etc/apt/sources.list.d/cloudflared.list
+# Install cloudflared
+RUN apt-get update && apt-get install -y cloudflared
+# Copy requirements first to leverage Docker cache
+COPY backend/requirements.txt .
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+# Copy application code
+COPY backend/ .
+# ---- Update
+RUN cd ./ws-scrcpy && npm install --build-from-source && npm rebuild node-pty --build-from-source
+RUN cd ws-scrcpy && npm run dist:prod
+# ------------
+# Make shell scripts executable
+RUN chmod +x scripts/*.sh
+
+# ===== Frontend Build Stage =====
+FROM node:18-alpine AS frontend
+# This ARG will be provided by docker-compose during the build
+ARG VITE_BACKEND_API_URL
+# This ENV makes the ARG available to the 'npm run build' command
+ENV VITE_BACKEND_API_URL=$VITE_BACKEND_API_URL
+WORKDIR /app
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ ./
+# This build command now has access to the Vite env vars.
+RUN npm run build
+
+# ===== Final Stage =====
+FROM backend AS final
+WORKDIR /app
+# Copy frontend build from frontend stage
+COPY --from=frontend /app/dist ./frontend/dist
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash appuser
+RUN chown -R appuser:appuser /app
+USER root
+# Expose ports
+ARG FRONTEND_PORT
+ARG BACKEND_PORT
+EXPOSE ${FRONTEND_PORT}
+EXPOSE ${BACKEND_PORT}
+# Health check for backend
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:$BACKEND_PORT/health || exit 1
+# Install serve
+RUN npm install -g serve
+USER appuser
+# Start both frontend and backend
+CMD ["sh", "-c", "python3 app.py & serve -s frontend/dist -l tcp://0.0.0.0:${FRONTEND_PORT}"]

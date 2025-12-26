@@ -1,0 +1,31 @@
+services:
+
+  magdroid:
+    build:
+      context: .
+      dockerfile: dockerfile.magdroid
+      args:
+      
+        VITE_BACKEND_API_URL: ${VITE_BACKEND_API_URL}
+        FRONTEND_PORT: ${FRONTEND_PORT}
+        BACKEND_PORT: ${BACKEND_PORT}
+
+    image: magdroid-user1:v1.0
+    container_name: magdroid-user1
+    restart: unless-stopped
+
+    network_mode: "host"
+    privileged: true
+
+    environment:
+      VITE_BACKEND_API_URL: ${VITE_BACKEND_API_URL}
+      FRONTEND_PORT: ${FRONTEND_PORT}
+      BACKEND_PORT: ${BACKEND_PORT}
+      CLOUDFLARED_TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ADB_SERVER_PORT: ${ADB_SERVER_PORT}
+      DEVICES_RANGE: ${DEVICES_RANGE}
+
+    volumes:
+      - /home/${USER}/Documents/Automation/MagDroid/data:/app/data
+      - /dev/bus/usb:/dev/bus/usb

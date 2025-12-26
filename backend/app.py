@@ -5,19 +5,20 @@ import threading
 import time
 import re
 import requests
+import socket
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 # This should be the very first import to ensure environment variables are loaded.
 import config
 
-from auth_middleware import validate_clerk_token
 from process_manager import ProcessManager
 
 app = Flask(__name__)
 
 # Configure CORS from environment variables
 cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
+print(cors_origins)
 BACKEND_PORT = os.getenv('BACKEND_PORT', '5000')
 WS_SCRCPY_PATH = os.path.join(os.getcwd(), "ws-scrcpy")
 
@@ -28,38 +29,8 @@ process_manager = ProcessManager()
 
 
 
-# Middleware to validate Clerk JWT token
-@app.before_request
-def authenticate_request():
-    # Skip authentication for static files
-    if request.path.startswith('/static'):
-        return
-    
-    # Skip authentication for health check endpoint
-    if request.path == '/health':
-        return
-        
-    # Skip authentication for OPTIONS requests (CORS preflight)
-    if request.method == 'OPTIONS':
-        return
-        
-    # Validate Clerk token for all other endpoints
-    try:
-        validate_clerk_token(request)
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 401
 
 # Add CORS headers to all responses
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    return response
 
 # Welcome endpoint
 @app.route('/')
@@ -214,6 +185,40 @@ def is_ip_in_range(ip, ranges_str):
             continue
             
     return False
+
+def is_port_available(port):
+    """Check if a port is available."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(('localhost', port))
+            return True
+        except OSError:
+            return False
+
+def kill_process_on_port(port):
+    """Find and kill the process using the specified port."""
+    try:
+        # Use lsof to find the process using the port
+        result = subprocess.run(
+            ['lsof', '-ti', f':{port}'],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                try:
+                    subprocess.run(['kill', '-9', pid], check=True)
+                    print(f"Killed process {pid} using port {port}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Failed to kill process {pid}: {e}")
+            return True
+        else:
+            print(f"No process found using port {port}")
+            return False
+    except Exception as e:
+        print(f"Error killing process on port {port}: {e}")
+        return False
 
 @app.route('/get_mdns_services')
 def get_mdns_services():
@@ -457,6 +462,12 @@ def run_ws_scrcpy():
                 "details": "Process is already active"
             })
 
+        # Check if port 9786 is available, if not, kill the process using it
+        if not is_port_available(9786):
+            print("Port 9786 is not available, killing process using it...")
+            kill_process_on_port(9786)
+            time.sleep(2)  # Wait a bit for the port to be freed
+
         # Optimization: Check if the 'dist' build already exists
         dist_path = os.path.join(WS_SCRCPY_PATH, 'dist', 'index.js')
         if os.path.exists(dist_path):
@@ -506,19 +517,25 @@ def stop_ws_scrcpy():
     try:
         # Stop ws-scrcpy process
         stopped = process_manager.stop_process('ws-scrcpy')
-        
+
+        # Also stop any running tunnel that depends on ws-scrcpy
+        tunnel_stopped = process_manager.stop_process('cloudflared')
+
+        messages = []
         if stopped:
-            return jsonify({
-                "status": "success",
-                "output": "ws-scrcpy stopped successfully",
-                "details": "Process terminated"
-            })
+            messages.append("ws-scrcpy stopped successfully")
         else:
-            return jsonify({
-                "status": "success",
-                "output": "ws-scrcpy was not running",
-                "details": "No active process found"
-            })
+            messages.append("ws-scrcpy was not running")
+
+        if tunnel_stopped:
+            messages.append("Associated tunnel also stopped")
+        # No message if tunnel wasn't running
+
+        return jsonify({
+            "status": "success",
+            "output": "; ".join(messages),
+            "details": "Process terminated"
+        })
     except Exception as e:
         return jsonify({
             "status": "error",

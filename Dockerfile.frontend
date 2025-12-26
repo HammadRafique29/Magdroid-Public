@@ -2,12 +2,9 @@
 FROM node:18-alpine AS builder
 
 # This ARG will be provided by docker-compose during the build
-ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-ARG NEXT_PUBLIC_BACKEND_API_URL
+ARG VITE_BACKEND_API_URL
 # This ENV makes the ARG available to the 'npm run build' command
-
-ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-ENV NEXT_PUBLIC_BACKEND_API_URL=$NEXT_PUBLIC_BACKEND_API_URL
+ENV VITE_BACKEND_API_URL=$VITE_BACKEND_API_URL
 
 WORKDIR /app
 
@@ -15,7 +12,7 @@ COPY frontend/package*.json ./
 RUN npm install
 
 COPY frontend/ ./
-# This build command now has access to the Clerk key.
+# This build command now has access to the Vite env vars.
 RUN npm run build
 
 # ===== Production Stage =====
@@ -23,22 +20,17 @@ FROM node:18-alpine AS production
 WORKDIR /app
 
 RUN apk add --no-cache curl
+RUN npm install -g serve
 
 # Copy only the necessary artifacts from the builder stage
-COPY --from=builder /app/.next ./.next
-# This project does not have a public directory, so this line causes a build failure.
-# COPY --from=builder /app/public ./public
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
 
 # Use an ARG to receive the port from docker-compose
 ARG FRONTEND_PORT=3000
+ENV FRONTEND_PORT=$FRONTEND_PORT
 
 # Expose the port
 EXPOSE ${FRONTEND_PORT}
 
-# Set the PORT environment variable that Next.js automatically uses
-ENV PORT=${FRONTEND_PORT}
-
-# The start command will now respect the PORT environment variable
-CMD ["npm", "start"]
+# The serve command will serve the static files on the specified port
+CMD ["serve", "-s", "dist", "-l", "tcp://0.0.0.0:${FRONTEND_PORT}"]

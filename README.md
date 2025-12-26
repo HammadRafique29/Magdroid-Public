@@ -4,7 +4,7 @@ Magdroid is a application designed to manage Android devices using ADB, ws-scrcp
 
 ## Features
 
-- **[Clerk Authentication:](https://clerk.com/)** Secure login and protected backend endpoints. 
+- **~~[Clerk Authentication:](https://clerk.com/)~~** ~~Secure login and protected backend endpoints.~~ 
 - **ADB Automation:** Programmatically run ADB commands like `devices`, `mdns services`, and `connect`.
 - **ws-scrcpy Management:** Start and stop the ws-scrcpy server process.
 - **[Cloudflare Tunnel Control:](https://one.dash.cloudflare.com/)** Start and stop Cloudflare Tunnels to expose the ws-scrcpy service publicly.
@@ -12,9 +12,10 @@ Magdroid is a application designed to manage Android devices using ADB, ws-scrcp
 
 <br>
 
+
 ## Display:
 
-<img width="1573" height="775" alt="image" src="https://github.com/user-attachments/assets/2e9133d7-3335-41e9-89a0-ed947343c53f" />
+<img width="1170" height="909" alt="image" src="https://github.com/user-attachments/assets/5f291eea-a565-43b4-a2a4-e49cc70a2463" />
 
 ## WS-Scrcpy
 https://github.com/user-attachments/assets/8effe952-1c70-4d60-b41e-98a9fe0c6e28
@@ -26,7 +27,7 @@ https://github.com/user-attachments/assets/8effe952-1c70-4d60-b41e-98a9fe0c6e28
 ### Prerequisites
 
 - Docker and Docker Compose installed.
-- A Clerk.dev account and application set up.
+- ~~A Clerk.dev account and application set up.~~
 - A Cloudflare account (optional, for tunnels).
 
 ### 1. Enviroments Configuration
@@ -42,16 +43,13 @@ touch .env
 # Frontend Environment
 # -------------------------
 
-# -- SERVER CONFIGURATION --
-FRONTEND_PORT=3000
-
-# -- CLERK AUTHENTICATION --
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_XYyt...
-CLERK_SECRET_KEY=sk_test_XYyt
+FRONTEND_PORT=9785
 
 # -- API CONFIGURATION --
-NEXT_PUBLIC_BACKEND_API_URL=http://localhost:5000
-NEXT_PUBLIC_API_BASE_URL=/api
+VITE_BACKEND_API_URL=http://localhost:9784
+VITE_BACKEND_HOST=http://0.0.0.0
+VITE_API_BASE_URL=/api
+
 
 
 
@@ -60,21 +58,25 @@ NEXT_PUBLIC_API_BASE_URL=/api
 # -------------------------
 
 # -- FLASK SERVER CONFIGURATION --
-BACKEND_PORT=5000
+FLASK_RUN_PORT=9784
+BACKEND_PORT=9784
 
-# -- CLERK AUTHENTICATION --
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_XYyt...
-CLERK_SECRET_KEY=sk_test_XYyt...
-
-CLERK_ISSUER=https://your-domain.clerk.accounts.dev
-CLERK_JWKS_URL=https://your-domain.accounts.dev/.well-known/jwks.json
+ADB_SERVER_PORT=5039
 
 # -- CORS CONFIGURATION --
-CORS_ORIGINS=http://localhost:3000
+CORS_ORIGINS=http://localhost:9785
 
 # -- CLOUDFLARE TUNNELS --
 # (Optional) A persistent Cloudflare Tunnel token for the "Start Named Tunnel" feature.
-CLOUDFLARED_TUNNEL_TOKEN=eyJhIjoiNzQ3NDJlZGY2...
+CLOUDFLARED_TUNNEL_TOKEN=eyJhIjoiNzQ3NDJl...
+
+# The relative path for the API. This is prefixed to all API calls.
+NEXT_PUBLIC_API_BASE_URL=/api
+
+DEVICES_RANGE="192.168.1.46-192.168.1.47"
+
+
+DOCKER_GID=983
 ```
 
 
